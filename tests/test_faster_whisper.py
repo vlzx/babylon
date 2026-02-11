@@ -1,9 +1,12 @@
 import time
 from faster_whisper import WhisperModel
+import librosa
+import torch
 
 model_path = "local_models/faster-whisper-large-v3-turbo-ct2"
 print(f"Model: {model_path}")
 audio_path = "data/natsuyoshiyuko_s1.mp3"
+wav_numpy, sr = librosa.load('data/natsuyoshiyuko_s1.mp3', sr=16000)
 
 # 1. 加载模型
 model = WhisperModel(model_path, device="cuda")
@@ -13,7 +16,7 @@ start_time = time.time()
 
 # 执行转录
 # 注意：segments 是一个生成器，真正的计算发生在遍历 segments 时
-segments, info = model.transcribe(audio_path, language="ja")
+segments, info = model.transcribe(wav_numpy, language="ja")
 
 print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
 

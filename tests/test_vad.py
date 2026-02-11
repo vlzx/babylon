@@ -12,13 +12,10 @@ model = load_silero_vad(onnx=True)
 # 请替换为您实际的文件路径
 wav_numpy, sr = librosa.load('data/natsuyoshiyuko_s1.mp3', sr=16000)
 
-# 3. 将 numpy 数组转换为 PyTorch 张量
-wav = torch.tensor(wav_numpy)
-
 # --- 性能指标计算开始 ---
 
 # 计算音频总时长 (秒) = 样本总数 / 采样率
-audio_duration = len(wav) / 16000
+audio_duration = len(wav_numpy) / 16000
 
 print(f"音频时长: {audio_duration:.2f} 秒")
 
@@ -27,7 +24,7 @@ start_time = time.time()
 
 # 4. 获取语音时间戳 (推理过程)
 speech_timestamps = get_speech_timestamps(
-    wav,
+    wav_numpy,
     model,
     return_seconds=True  # 返回秒为单位的时间戳 (默认是样本数)
 )
