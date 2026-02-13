@@ -1,39 +1,89 @@
+import shutil
+import numpy as np
 import torch
 import librosa
 import time
-from silero_vad import load_silero_vad, get_speech_timestamps
+import os
+from collections import deque
+from scipy.io.wavfile import write as wav_write
+from silero_vad import load_silero_vad, VADIterator, get_speech_timestamps
 
-# 1. 加载模型
-# onnx=True 通常推理速度更快
+
+# --- 1. 配置参数 ---
+SAMPLING_RATE = 16000
+CHUNK_SIZE = 512
+VAD_THRESHOLD = 0.5
+VAD_PADDING_MS = 500  # 前后缓冲
+
+OUTPUT_DIR = "data/vad_segments_merged"
+if os.path.exists(OUTPUT_DIR):
+    shutil.rmtree(OUTPUT_DIR)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# --- 2. 加载 ---
 model = load_silero_vad(onnx=True)
+wav_numpy, sr = librosa.load('data/nekoyashiki.mp3', sr=SAMPLING_RATE)
 
-# 2. 使用 librosa 代替 torchaudio 加载音频
-# Librosa 会自动重采样到 16000Hz (Silero 模型的要求) 并转换为 float32 格式
-# 请替换为您实际的文件路径
-wav_numpy, sr = librosa.load('data/natsuyoshiyuko_s1.mp3', sr=16000)
+vad_iterator = VADIterator(model, threshold=VAD_THRESHOLD, sampling_rate=SAMPLING_RATE, min_silence_duration_ms=VAD_PADDING_MS, speech_pad_ms=VAD_PADDING_MS)
 
-# --- 性能指标计算开始 ---
+audio_duration = len(wav_numpy)/SAMPLING_RATE
+print(f"音频时长: {audio_duration:.2f}s")
+print("--------------------------------------------------")
 
-# 计算音频总时长 (秒) = 样本总数 / 采样率
-audio_duration = len(wav_numpy) / 16000
+def save_segment(chunks, idx):
+    if not chunks: return
+    full = np.concatenate(chunks)
+    path = os.path.join(OUTPUT_DIR, f"seg_{idx:03d}.wav")
+    wav_write(path, SAMPLING_RATE, full)
+    print(f"  -> [保存文件] {path} (时长: {len(full)/SAMPLING_RATE:.2f}s)")
 
-print(f"音频时长: {audio_duration:.2f} 秒")
+# --- 4. 循环 ---
+count = 0
+count_short_audio = 0
+count_long_audio = 0
+current_start = None # 用于暂存 start 时间戳
 
-# 记录开始时间
-start_time = time.time()
+print("开始处理...")
+start = time.time()
 
-# 4. 获取语音时间戳 (推理过程)
-speech_timestamps = get_speech_timestamps(
-    wav_numpy,
-    model,
-    return_seconds=True  # 返回秒为单位的时间戳 (默认是样本数)
-)
+for i in range(0, len(wav_numpy), CHUNK_SIZE):
+    chunk = wav_numpy[i : i + CHUNK_SIZE]
+    if len(chunk) < CHUNK_SIZE: break
+    
+    speech_dict = vad_iterator(chunk)
+    
+    if speech_dict:
+        # 1. 只有 start：记录开始点
+        if 'start' in speech_dict:
+            current_start = speech_dict['start']
+            # print(f"检测到起点: {current_start}")
 
-# 记录结束时间
-end_time = time.time()
+        # 2. 只有 end：获取结束点 -> 切片 -> 保存
+        if 'end' in speech_dict:
+            current_end = speech_dict['end']
+            
+            # 确保有过 start (防止只有 end 的异常情况)
+            if current_start is not None:
+                # 核心逻辑：直接根据时间戳从原始 numpy 数组切片
+                # 注意：speech_dict返回的是采样点索引，直接用于切片即可
+                segment = wav_numpy[current_start : current_end]
+                duration_s = (current_end - current_start) / SAMPLING_RATE
+                
+                # 调用你的保存函数 (你的函数期望由 chunk 组成的 list，所以这里包一层 [])
+                save_segment([segment], count)
+                count += 1
+                if duration_s > 28:
+                    count_long_audio += 1
+                if duration_s < 1:
+                    count_short_audio += 1
+                
+                # 重置 start，准备下一段
+                current_start = None 
 
-# 计算处理耗时
-processing_time = end_time - start_time
+processing_time = time.time() - start
+print(f'Total segments saved: {count}')
+print(f'Total segments > 28s: {count_long_audio}')
+print(f'Total segments < 1s: {count_short_audio}')
 
 # 计算 RTF (实时率)
 # RTF = 处理耗时 / 音频时长
@@ -44,7 +94,7 @@ rtf = processing_time / audio_duration
 
 print("--------------------------------------------------")
 print(f"处理耗时: {processing_time:.4f} 秒")
+print(f"音频时长: {audio_duration:.2f}s")
 print(f"RTF (实时率): {rtf:.4f}")
-print(f"检测到的语音段数量: {len(speech_timestamps)}")
-print("--------------------------------------------------")
-print("语音时间戳详情:", speech_timestamps)
+
+vad_iterator.reset_states()
