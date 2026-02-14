@@ -6,11 +6,19 @@ import soundfile as sf
 from natsort import natsorted
 
 
+def format_hms(seconds: float) -> str:
+    total_seconds = int(seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
 model_path = "local_models/faster-whisper-large-v3-turbo-ct2"
 # model_path = "local_models/faster-whisper-tiny"
 print(f"Model: {model_path}")
 # wav_numpy, sr = librosa.load('data/natsuyoshiyuko_s1.mp3', sr=16000)
-audio_dir = "data/"
+audio_dir = "data/asr"
 
 # 1. 加载模型
 model = WhisperModel(model_path, device="cuda")
@@ -23,7 +31,7 @@ for filename in sorted_files:
         continue
     print(f'\n{filename}')
     wav_numpy, samplerate = sf.read(os.path.join(audio_dir, filename), dtype='float32')
-
+    # wav_numpy = wav_numpy[:samplerate*30]
     print(f"采样率: {samplerate} Hz")
     print(f"数据形状: {wav_numpy.shape}") # (samples, channels)
     print(f"数据类型: {wav_numpy.dtype}")
@@ -38,13 +46,8 @@ for filename in sorted_files:
     segments, info = model.transcribe(wav_numpy,
                                       language="ja",
                                       word_timestamps=True,
-                                      #   initial_prompt="",
-                                      vad_filter=True,
-                                      vad_parameters=VadOptions(
-                                        threshold=0.05,
-                                        min_silence_duration_ms=4000,
-                                        speech_pad_ms=2000
-                                    )
+                                      condition_on_previous_text=False,
+                                    #   initial_prompt="",
     )
 
     print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
@@ -52,7 +55,7 @@ for filename in sorted_files:
     # 3. 遍历结果（此时模型在真正工作）
     prev_end = 0.0
     for segment in segments:
-        res = f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}"
+        res = f"[{format_hms(segment.start)} -> {format_hms(segment.end)}] {segment.text}"
         print(res)
         # print(segment.words)
         if segment.start != prev_end:
