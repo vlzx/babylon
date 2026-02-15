@@ -1,17 +1,13 @@
 import os
+import sys
 import time
 from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions
 import soundfile as sf
 from natsort import natsorted
 
-
-def format_hms(seconds: float) -> str:
-    total_seconds = int(seconds)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    secs = total_seconds % 60
-    return f"{hours}:{minutes:02d}:{secs:02d}"
+sys.path.append(os.getcwd())
+from utils.chrono import format_hms
 
 
 model_path = "local_models/faster-whisper-large-v3-turbo-ct2"
@@ -31,7 +27,7 @@ for filename in sorted_files:
         continue
     print(f'\n{filename}')
     wav_numpy, samplerate = sf.read(os.path.join(audio_dir, filename), dtype='float32')
-    # wav_numpy = wav_numpy[:samplerate*30]
+    wav_numpy = wav_numpy[:int(samplerate*0.5)]
     print(f"采样率: {samplerate} Hz")
     print(f"数据形状: {wav_numpy.shape}") # (samples, channels)
     print(f"数据类型: {wav_numpy.dtype}")
@@ -47,23 +43,24 @@ for filename in sorted_files:
                                       language="ja",
                                       word_timestamps=True,
                                       condition_on_previous_text=False,
-                                    #   initial_prompt="",
     )
 
-    print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
+    # print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
 
     # 3. 遍历结果（此时模型在真正工作）
     prev_end = 0.0
     for segment in segments:
         res = f"[{format_hms(segment.start)} -> {format_hms(segment.end)}] {segment.text}"
         print(res)
-        # print(segment.words)
+        metrics = f'temperature:{segment.temperature}  avg_logprob:{segment.avg_logprob:.2f}  compression_ratio:{segment.compression_ratio:.2f}'
+        print(metrics)
         if segment.start != prev_end:
             msg = f'Δ +{segment.start - prev_end:.2f}s'
             print(msg)
             f.write(msg + '\n')
         prev_end = segment.end
         f.write(res + '\n')
+        f.write(metrics + '\n')
 
     # 4. 结束计时
     end_time = time.time()

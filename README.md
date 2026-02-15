@@ -3,7 +3,7 @@
 ```mermaid
 graph TD
     %% ==========================================
-    %% 进程 1: WS网关
+    %% 进程 1: 网关
     %% ==========================================
     subgraph P1 ["Process 1: Gateway"]
         direction TB
@@ -29,14 +29,20 @@ graph TD
     end
 
     %% ==========================================
-    %% 进程 2: ASR引擎（GPU推理）
+    %% 进程 2: GPU Worker
     %% ==========================================
     subgraph P2 ["Process 2: GPU Worker"]
         direction TB
         
-        Q_In --> LVQ[("Last Value Queue")] --> Whisper["Faster-Whisper<br/>(large-v3-turbo)"]
+        Q_In --> LVQ[("Last Value Queue")] --> VAD["VAD<br/>(faster-whisper-tiny)"]
         
-        Whisper --> Q_Out
+        ASR["ASR<br/>(faster-whisper-large-v3-turbo)"]
+
+        VAD --> SpeechCheck{"Speech"}
+        SpeechCheck --> |"Yes"| ASR
+        SpeechCheck --> |"No"| Slicer
+        
+        ASR --> Q_Out
     end
 
     %% 样式
@@ -47,6 +53,6 @@ graph TD
     
     class RingBuf,TextMem,Q_In,Q_Out,LVQ buffer;
     class P1,P2 process;
-    class WSGateway,Silero,Whisper component;
+    class WSGateway,VAD,ASR component;
     class FinalTask,ResFinal urgent;
 ```
