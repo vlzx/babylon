@@ -37,6 +37,7 @@ last_valid_text = ""
 last_merged_text = ""
 same_merged_count = 0
 initial_prompt = ""
+is_speech = False
 
 start_idx = 0  # 当前缓冲区起始采样点
 end_idx = 0  # 当前缓冲区结束采样点
@@ -51,39 +52,47 @@ for i in range(0, len(wav_numpy), int(sample_rate * 1)):
     start_time = time.time()
 
     # ----- VAD -----
-    # 注意：segments 是一个生成器，真正的计算发生在遍历 segments 时
-    detect_segments, info = vad_model.transcribe(buffer,
-                                        language="ja",
-                                        without_timestamps=True,
-                                        condition_on_previous_text=False,
-    )
+    if not is_speech:
+        # 注意：segments 是一个生成器，真正的计算发生在遍历 segments 时
+        detect_segments, info = vad_model.transcribe(buffer,
+                                            language="ja",
+                                            without_timestamps=True,
+                                            condition_on_previous_text=False,
+        )
 
-    detect_results = list(detect_segments)
-    # print(f'is_speech: {len(detect_results)}')
-    # 场景A1 静音
-    if len(detect_results) == 0:
-        last_merged_text = ""
-        same_merged_count = 0
-        start_idx = end_idx  # 无语音时跳过音频
-        initial_prompt = ""
-        print(f'[VAD] no_speech_probs: []')
-        print(f'耗时: {time.time() - start_time:.2f}s')
-        continue
-    else:
-        for segment in detect_results:
-            res = f"[VAD] [{format_hms(segment.start)} -> {format_hms(segment.end)}] {segment.text}"
-            # print(res)
-            metrics = f'[VAD] temperature:{segment.temperature}  avg_logprob:{segment.avg_logprob:.2f}  compression_ratio:{segment.compression_ratio:.2f}  no_speech_prob:{segment.no_speech_prob}'
-            # print(metrics)
-        print(f'[VAD] no_speech_probs: {[segment.no_speech_prob for segment in detect_results]}')
-        # 场景A2 非人声（no_speech_prob > 0.8）
-        if all([segment.no_speech_prob > 0.8 for segment in detect_results]):
+        detect_results = list(detect_segments)
+        # 场景A1 静音
+        if len(detect_results) == 0:
             last_merged_text = ""
             same_merged_count = 0
-            start_idx = end_idx  # 高 no_speech 概率时跳过音频
+            start_idx = end_idx  # 无语音时跳过音频
             initial_prompt = ""
+            is_speech = False
+            vad_msg = f'[VAD] no_speech_probs: []'
+            print(vad_msg)
+            f.write(vad_msg + '\n')
             print(f'耗时: {time.time() - start_time:.2f}s')
             continue
+        else:
+            for segment in detect_results:
+                res = f"[VAD] [{format_hms(segment.start)} -> {format_hms(segment.end)}] {segment.text}"
+                # print(res)
+                metrics = f'[VAD] temperature:{segment.temperature}  avg_logprob:{segment.avg_logprob:.2f}  compression_ratio:{segment.compression_ratio:.2f}  no_speech_prob:{segment.no_speech_prob}'
+                # print(metrics)
+            vad_msg = f'[VAD] no_speech_probs: {[segment.no_speech_prob for segment in detect_results]}'
+            print(vad_msg)
+            f.write(vad_msg + '\n')
+            # 场景A2 非人声（no_speech_prob > 0.8）
+            if all([segment.no_speech_prob > 0.8 for segment in detect_results]):
+                last_merged_text = ""
+                same_merged_count = 0
+                start_idx = end_idx  # 高 no_speech 概率时跳过音频
+                initial_prompt = ""
+                is_speech = False
+                print(f'耗时: {time.time() - start_time:.2f}s')
+                continue
+        # 不符合场景A1A2，判定为人声
+        is_speech = True
 
     # ----- ASR -----
     segments, info = asr_model.transcribe(buffer,
@@ -171,6 +180,9 @@ for i in range(0, len(wav_numpy), int(sample_rate * 1)):
         f.write(cut_msg + '\n')
         start_idx = next_start_idx  # 提交下一轮缓冲区起始采样点
         initial_prompt = last_merged_text[-20:]
+        # 新音频需要VAD
+        if next_start_idx == end_idx:
+            is_speech = False
 
     # 结束计时
     end_time = time.time()
