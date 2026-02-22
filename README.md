@@ -22,7 +22,7 @@ graph TD
     %% IPC 通信层
     %% ==========================================
     subgraph IPC1 ["IPC Channel"]
-        Slicer -->|"Interval 500ms"| Q_In[("Input Queue")]
+        Slicer -->|"Interval 1s"| Q_In[("Input Queue")]
     end
     subgraph IPC1 ["IPC Channel"]
         Q_Out[("Output Queue")] --> ResCheck
@@ -40,7 +40,7 @@ graph TD
 
         VAD --> SpeechCheck{"Speech"}
         SpeechCheck --> |"Yes"| ASR
-        SpeechCheck --> |"No"| Slicer
+        SpeechCheck --> |"No"| Q_Out
         
         ASR --> Q_Out
     end

@@ -7,7 +7,7 @@ from rich import print
 
 sys.path.append(os.getcwd())
 from utils.chrono import format_hms
-from utils.string import get_added_part
+from utils.string import get_changed_part
 
 
 hallucination_blacklist = [
@@ -129,7 +129,7 @@ for i in range(0, len(wav_numpy), int(sample_rate * 1)):
         prev_end = segment.end
 
     merged_text = "".join(merged_text_parts).strip()
-    delta_text = get_added_part(last_valid_text, merged_text)
+    delta_text = get_changed_part(last_valid_text, merged_text)
     delta_msg = f"[DELTA] {delta_text}"
     asr_msg = f"[ASR] {merged_text}"
     prompt_msg = f"[LAST] {last_valid_text}\n[INIT_PROMPT] {initial_prompt}"
