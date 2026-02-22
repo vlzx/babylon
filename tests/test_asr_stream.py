@@ -12,6 +12,7 @@ sys.path.append(os.getcwd())
 from utils.audio import stream_wav_realtime
 from utils.chrono import format_hms
 from utils.string import get_changed_part
+from utils.logging import logger
 
 
 hallucination_blacklist = [
@@ -32,9 +33,9 @@ sample_rate = audio_info.samplerate
 one_second_samples = int(sample_rate * 1.0)
 total_audio_duration = audio_info.duration
 
-print(f"采样率: {sample_rate} Hz")
-print(f"总时长: {total_audio_duration:.2f}s")
-print(f"每轮累计时长: 1.00s ({one_second_samples} samples)")
+logger.info(f"采样率: {sample_rate} Hz")
+logger.info(f"总时长: {total_audio_duration:.2f}s")
+logger.info(f"每轮累计时长: 1.00s ({one_second_samples} samples)")
 
 script_start_time = time.time()
 
@@ -46,7 +47,7 @@ is_speech = False
 
 start_idx = 0
 end_idx = 0
-audio_cache = None
+audio_cache = np.empty((0,))
 shared = {
     "ready_chunks": [],
     "tail_samples": 0,
@@ -102,15 +103,12 @@ while True:
 
         one_sec_chunk = shared["ready_chunks"].pop(0)
 
-    if audio_cache is None:
-        audio_cache = one_sec_chunk
-    else:
-        audio_cache = np.concatenate([audio_cache, one_sec_chunk], axis=0)
+    audio_cache = np.concatenate([audio_cache, one_sec_chunk], axis=0)
 
     end_idx += len(one_sec_chunk)
     buffer = audio_cache[start_idx:end_idx].copy()
     timestamp = f"audio->[{format_hms(start_idx / sample_rate)}:{format_hms(end_idx / sample_rate)}]"
-    print(timestamp)
+    logger.debug(timestamp)
     f.write(timestamp + "\n")
 
     start_time = time.time()
@@ -132,12 +130,12 @@ while True:
             initial_prompt = ""
             is_speech = False
             vad_msg = "[VAD] no_speech_probs: []"
-            print(vad_msg)
+            logger.debug(vad_msg)
             f.write(vad_msg + "\n")
-            print(f"耗时: {time.time() - start_time:.2f}s")
+            logger.debug(f"耗时: {time.time() - start_time:.2f}s")
             continue
         vad_msg = f"[VAD] no_speech_probs: {[segment.no_speech_prob for segment in detect_results]}"
-        print(vad_msg)
+        logger.debug(vad_msg)
         f.write(vad_msg + "\n")
         if all(segment.no_speech_prob > 0.8 for segment in detect_results):
             last_merged_text = ""
@@ -145,7 +143,7 @@ while True:
             start_idx = end_idx
             initial_prompt = ""
             is_speech = False
-            print(f"耗时: {time.time() - start_time:.2f}s")
+            logger.debug(f"耗时: {time.time() - start_time:.2f}s")
             continue
         is_speech = True
 
@@ -165,7 +163,7 @@ while True:
         merged_text_parts.append(segment.text)
         if segment.start != prev_end:
             msg = f"Δ +{segment.start - prev_end:.2f}s"
-            print(msg)
+            logger.debug(msg)
             f.write(msg + "\n")
             cut_sec = (segment.start + prev_end) / 2
             candidate_start_idx = start_idx + int(cut_sec * sample_rate)
@@ -177,7 +175,7 @@ while True:
                 f"long segment {format_hms(segment_duration)} > {format_hms(max_sentence_sec)}, "
                 f"cut by segment.end={format_hms(segment.end)}"
             )
-            print(msg)
+            logger.debug(msg)
             f.write(msg + "\n")
             candidate_start_idx = end_idx
             next_start_idx = max(next_start_idx, candidate_start_idx)
@@ -189,13 +187,13 @@ while True:
         merged_text.replace(' ', '').replace('\n', ''),
     )
     asr_msg = f"[LAST] {last_valid_text}\n[INIT_PROMPT] {initial_prompt}\n[ASR] {merged_text}\n[DELTA] {delta_text}"
-    print(asr_msg)
+    logger.info(asr_msg)
     f.write(asr_msg + "\n")
 
     for item in hallucination_blacklist:
         if item in delta_text:
             merged_text = merged_text.replace(item, "")
-            print(f"[REVISED] {merged_text}")
+            logger.debug(f"[REVISED] {merged_text}")
             f.write(f"[REVISED] {merged_text}\n")
 
     if not merged_text:
@@ -214,7 +212,7 @@ while True:
 
     if same_merged_count >= 3 and prev_end > 0:
         stable_msg = f"stable merged_text x{same_merged_count}, cut by sentence end={format_hms(prev_end)}"
-        print(stable_msg)
+        logger.debug(stable_msg)
         f.write(stable_msg + "\n")
         candidate_start_idx = end_idx
         next_start_idx = max(next_start_idx, candidate_start_idx)
@@ -225,7 +223,7 @@ while True:
             f"cut start_idx: {format_hms(start_idx / sample_rate)} -> "
             f"{format_hms(next_start_idx / sample_rate)}"
         )
-        print(cut_msg)
+        logger.debug(cut_msg)
         f.write(cut_msg + "\n")
         start_idx = next_start_idx
         initial_prompt = last_merged_text[-20:]
@@ -237,27 +235,27 @@ while True:
     audio_duration = info.duration
     rtf = asr_duration / audio_duration if audio_duration > 0 else 0.0
 
-    print("-" * 30)
-    print(f"音频时长 (Audio Duration): {audio_duration:.2f}s")
-    print(f"转录耗时 (ASR Duration):   {asr_duration:.2f}s")
-    print(f"实时率 (RTF):            {rtf:.4f}")
+    logger.debug("-" * 30)
+    logger.debug(f"音频时长 (Audio Duration): {audio_duration:.2f}s")
+    logger.debug(f"转录耗时 (ASR Duration):   {asr_duration:.2f}s")
+    logger.debug(f"实时率 (RTF):            {rtf:.4f}")
 
 with condition:
     remainder = shared["tail_samples"]
 
 if remainder > 0:
     remainder_msg = f"[TAIL] 剩余不足1秒音频未触发识别: {remainder / sample_rate:.2f}s"
-    print(remainder_msg)
+    logger.debug(remainder_msg)
     f.write(remainder_msg + "\n")
 
 script_end_time = time.time()
 script_duration = script_end_time - script_start_time
 script_rtf = script_duration / total_audio_duration if total_audio_duration > 0 else 0.0
 
-print("=" * 30)
-print(f"脚本总音频时长 (Total Audio Duration): {format_hms(total_audio_duration)}")
-print(f"脚本总耗时 (Script Duration):        {format_hms(script_duration)}")
-print(f"脚本整体实时率 (Overall RTF):        {script_rtf:.4f}")
+logger.info("=" * 30)
+logger.info(f"脚本总音频时长 (Total Audio Duration): {format_hms(total_audio_duration)}")
+logger.info(f"脚本总耗时 (Script Duration):        {format_hms(script_duration)}")
+logger.info(f"脚本整体实时率 (Overall RTF):        {script_rtf:.4f}")
 f.write("=" * 30 + "\n")
 f.write(f"脚本总音频时长 (Total Audio Duration): {format_hms(total_audio_duration)}\n")
 f.write(f"脚本总耗时 (Script Duration):        {format_hms(script_duration)}\n")

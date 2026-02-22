@@ -218,3 +218,4 @@ __marimo__/
 .vscode/
 data/
 local_models/
+logs/
