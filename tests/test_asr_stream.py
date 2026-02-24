@@ -4,7 +4,8 @@ import time
 import threading
 
 from faster_whisper import WhisperModel
-from rich import print
+from rich.live import Live
+from rich.text import Text
 import soundfile as sf
 import numpy as np
 
@@ -12,8 +13,10 @@ sys.path.append(os.getcwd())
 from utils.audio import stream_wav_realtime
 from utils.chrono import format_hms
 from utils.string import get_changed_part
-from utils.logging import logger
+from utils.logging import setup_logger
 
+
+logger = setup_logger(level="WARNING")
 
 hallucination_blacklist = [
     "ご視聴ありがとうございました",
@@ -25,9 +28,9 @@ vad_model_path = "local_models/faster-whisper-tiny"
 
 asr_model = WhisperModel(asr_model_path, device="cuda")
 vad_model = WhisperModel(vad_model_path, device="cuda")
-max_sentence_sec = 15.0
+max_sentence_sec = 20.0
 
-wav_path = "data/nekoyashiki_utawaku.wav"
+wav_path = "data/nekoyashiki_utawaku_test.wav"
 audio_info = sf.info(wav_path)
 sample_rate = audio_info.samplerate
 one_second_samples = int(sample_rate * 1.0)
@@ -86,159 +89,170 @@ reader_thread = threading.Thread(target=stream_reader_worker, name="wav-stream-r
 reader_thread.start()
 
 f = open(os.path.join("data/transcript", "nekoyashiki_utawaku_stream.txt"), "w+", encoding="utf-8")
-while True:
-    with condition:
-        while (
-            len(shared["ready_chunks"]) == 0
-            and shared["reader_error"] is None
-            and not shared["reader_done"]
-        ):
-            condition.wait()
+waiting_text = Text("Listening...", style="dim italic blue")
+with Live(waiting_text, refresh_per_second=10) as live:
+    while True:
+        with condition:
+            while (
+                len(shared["ready_chunks"]) == 0
+                and shared["reader_error"] is None
+                and not shared["reader_done"]
+            ):
+                condition.wait()
 
-        if shared["reader_error"] is not None:
-            raise RuntimeError("stream_wav_realtime reader failed") from shared["reader_error"]
+            if shared["reader_error"] is not None:
+                raise RuntimeError("stream_wav_realtime reader failed") from shared["reader_error"]
 
-        if len(shared["ready_chunks"]) == 0 and shared["reader_done"]:
-            break
+            if len(shared["ready_chunks"]) == 0 and shared["reader_done"]:
+                break
 
-        one_sec_chunk = shared["ready_chunks"].pop(0)
+            one_sec_chunk = shared["ready_chunks"].pop(0)
 
-    audio_cache = np.concatenate([audio_cache, one_sec_chunk], axis=0)
+        audio_cache = np.concatenate([audio_cache, one_sec_chunk], axis=0)
 
-    end_idx += len(one_sec_chunk)
-    buffer = audio_cache[start_idx:end_idx].copy()
-    timestamp = f"audio->[{format_hms(start_idx / sample_rate)}:{format_hms(end_idx / sample_rate)}]"
-    logger.debug(timestamp)
-    f.write(timestamp + "\n")
+        end_idx += len(one_sec_chunk)
+        buffer = audio_cache[start_idx:end_idx].copy()
+        timestamp = f"[{format_hms(start_idx / sample_rate)} -> {format_hms(end_idx / sample_rate)}]"
+        logger.debug(timestamp)
+        f.write(timestamp + "\n")
 
-    start_time = time.time()
+        start_time = time.time()
 
-    # ----- VAD -----
-    if not is_speech:
-        detect_segments, _ = vad_model.transcribe(
-            buffer,
-            language="ja",
-            without_timestamps=True,
-            condition_on_previous_text=False,
-        )
+        # ----- VAD -----
+        if not is_speech:
+            detect_segments, _ = vad_model.transcribe(
+                buffer,
+                language="ja",
+                without_timestamps=True,
+                condition_on_previous_text=False,
+            )
 
-        detect_results = list(detect_segments)
-        if len(detect_results) == 0:
-            last_merged_text = ""
-            same_merged_count = 0
-            start_idx = end_idx
-            initial_prompt = ""
-            is_speech = False
-            vad_msg = "[VAD] no_speech_probs: []"
+            detect_results = list(detect_segments)
+            if len(detect_results) == 0:
+                last_merged_text = ""
+                same_merged_count = 0
+                start_idx = end_idx
+                initial_prompt = ""
+                is_speech = False
+                vad_msg = "[VAD] no_speech_probs: []"
+                logger.debug(vad_msg)
+                f.write(vad_msg + "\n")
+                logger.debug(f"耗时: {time.time() - start_time:.2f}s")
+                continue
+            vad_msg = f"[VAD] no_speech_probs: {[segment.no_speech_prob for segment in detect_results]}"
             logger.debug(vad_msg)
             f.write(vad_msg + "\n")
-            logger.debug(f"耗时: {time.time() - start_time:.2f}s")
-            continue
-        vad_msg = f"[VAD] no_speech_probs: {[segment.no_speech_prob for segment in detect_results]}"
-        logger.debug(vad_msg)
-        f.write(vad_msg + "\n")
-        if all(segment.no_speech_prob > 0.8 for segment in detect_results):
+            if all(segment.no_speech_prob > 0.8 for segment in detect_results):
+                last_merged_text = ""
+                same_merged_count = 0
+                start_idx = end_idx
+                initial_prompt = ""
+                is_speech = False
+                logger.debug(f"耗时: {time.time() - start_time:.2f}s")
+                continue
+            is_speech = True
+
+        # ----- ASR -----
+        asr_segments, info = asr_model.transcribe(
+            buffer,
+            language="ja",
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            initial_prompt=initial_prompt,
+        )
+
+        prev_end = 0.0
+        next_start_idx = start_idx
+        merged_text_parts = []
+        asr_results = list(asr_segments)
+        for segment in asr_results:
+            # print(segment.start, segment.end)
+            merged_text_parts.append(segment.text)
+            if segment.start != prev_end:
+                msg = f"Δ +{segment.start - prev_end:.2f}s"
+                logger.debug(msg)
+                f.write(msg + "\n")
+                cut_sec = (segment.start + prev_end) / 2
+                candidate_start_idx = start_idx + int(cut_sec * sample_rate)
+                next_start_idx = max(next_start_idx, candidate_start_idx)
+
+            segment_duration = segment.end - segment.start
+            if segment_duration > max_sentence_sec:
+                msg = (
+                    f"long segment {format_hms(segment_duration)} > {format_hms(max_sentence_sec)}, "
+                    f"cut by segment.end={format_hms(segment.end)}"
+                )
+                logger.debug(msg)
+                f.write(msg + "\n")
+                candidate_start_idx = end_idx
+                next_start_idx = max(next_start_idx, candidate_start_idx)
+            prev_end = segment.end
+
+        merged_text = "".join(merged_text_parts).strip()
+        delta_text = get_changed_part(
+            last_valid_text.replace(' ', '').replace('\n', ''),
+            merged_text.replace(' ', '').replace('\n', ''),
+        )
+        asr_msg = f"[LAST] {last_valid_text}\n[INIT_PROMPT] {initial_prompt}\n[ASR] {merged_text}\n[DELTA] {delta_text}"
+        logger.info(asr_msg)
+        f.write(asr_msg + "\n")
+
+        for item in hallucination_blacklist:
+            if item in delta_text:
+                merged_text = merged_text.replace(item, "")
+                delta_text = delta_text.replace(item, "")
+                logger.debug(f"[REVISED] {merged_text}")
+                f.write(f"[REVISED] {merged_text}\n")
+
+        if not merged_text:
+            next_start_idx = end_idx
+
+        if merged_text:
+            last_valid_text = merged_text
+            if merged_text == last_merged_text:
+                same_merged_count += 1
+            else:
+                last_merged_text = merged_text
+                same_merged_count = 1
+        else:
             last_merged_text = ""
             same_merged_count = 0
-            start_idx = end_idx
-            initial_prompt = ""
-            is_speech = False
-            logger.debug(f"耗时: {time.time() - start_time:.2f}s")
-            continue
-        is_speech = True
 
-    # ----- ASR -----
-    segments, info = asr_model.transcribe(
-        buffer,
-        language="ja",
-        word_timestamps=True,
-        condition_on_previous_text=False,
-        initial_prompt=initial_prompt,
-    )
-
-    prev_end = 0.0
-    next_start_idx = start_idx
-    merged_text_parts = []
-    for segment in segments:
-        merged_text_parts.append(segment.text)
-        if segment.start != prev_end:
-            msg = f"Δ +{segment.start - prev_end:.2f}s"
-            logger.debug(msg)
-            f.write(msg + "\n")
-            cut_sec = (segment.start + prev_end) / 2
-            candidate_start_idx = start_idx + int(cut_sec * sample_rate)
-            next_start_idx = max(next_start_idx, candidate_start_idx)
-
-        segment_duration = segment.end - segment.start
-        if segment_duration > max_sentence_sec:
-            msg = (
-                f"long segment {format_hms(segment_duration)} > {format_hms(max_sentence_sec)}, "
-                f"cut by segment.end={format_hms(segment.end)}"
-            )
-            logger.debug(msg)
-            f.write(msg + "\n")
+        if same_merged_count >= 3 and prev_end > 0:
+            stable_msg = f"stable merged_text x{same_merged_count}, cut by sentence end={format_hms(prev_end)}"
+            logger.debug(stable_msg)
+            f.write(stable_msg + "\n")
             candidate_start_idx = end_idx
             next_start_idx = max(next_start_idx, candidate_start_idx)
-        prev_end = segment.end
 
-    merged_text = "".join(merged_text_parts).strip()
-    delta_text = get_changed_part(
-        last_valid_text.replace(' ', '').replace('\n', ''),
-        merged_text.replace(' ', '').replace('\n', ''),
-    )
-    asr_msg = f"[LAST] {last_valid_text}\n[INIT_PROMPT] {initial_prompt}\n[ASR] {merged_text}\n[DELTA] {delta_text}"
-    logger.info(asr_msg)
-    f.write(asr_msg + "\n")
+        if next_start_idx / sample_rate - start_idx / sample_rate > 1:
+            next_start_idx = max(next_start_idx, start_idx)
+            cut_msg = (
+                f"cut start_idx: {format_hms(start_idx / sample_rate)} -> "
+                f"{format_hms(next_start_idx / sample_rate)}"
+            )
+            logger.debug(cut_msg)
+            f.write(cut_msg + "\n")
+            start_idx = next_start_idx
+            initial_prompt = last_merged_text[-20:]
+            if next_start_idx == end_idx:
+                is_speech = False
+            live.console.print(f"[white] {timestamp} {merged_text.replace("\n", "")}[/]")
 
-    for item in hallucination_blacklist:
-        if item in delta_text:
-            merged_text = merged_text.replace(item, "")
-            logger.debug(f"[REVISED] {merged_text}")
-            f.write(f"[REVISED] {merged_text}\n")
+        live.update(Text().assemble(
+            (timestamp + " " + merged_text.replace("\n", ""), "bold cyan underline"),
+            ("▋", "blink bold white")
+        ))
 
-    if not merged_text:
-        next_start_idx = end_idx
+        end_time = time.time()
+        asr_duration = end_time - start_time
+        audio_duration = info.duration
+        rtf = asr_duration / audio_duration if audio_duration > 0 else 0.0
 
-    if merged_text:
-        last_valid_text = merged_text
-        if merged_text == last_merged_text:
-            same_merged_count += 1
-        else:
-            last_merged_text = merged_text
-            same_merged_count = 1
-    else:
-        last_merged_text = ""
-        same_merged_count = 0
-
-    if same_merged_count >= 3 and prev_end > 0:
-        stable_msg = f"stable merged_text x{same_merged_count}, cut by sentence end={format_hms(prev_end)}"
-        logger.debug(stable_msg)
-        f.write(stable_msg + "\n")
-        candidate_start_idx = end_idx
-        next_start_idx = max(next_start_idx, candidate_start_idx)
-
-    if next_start_idx > start_idx:
-        next_start_idx = max(next_start_idx, start_idx)
-        cut_msg = (
-            f"cut start_idx: {format_hms(start_idx / sample_rate)} -> "
-            f"{format_hms(next_start_idx / sample_rate)}"
-        )
-        logger.debug(cut_msg)
-        f.write(cut_msg + "\n")
-        start_idx = next_start_idx
-        initial_prompt = last_merged_text[-20:]
-        if next_start_idx == end_idx:
-            is_speech = False
-
-    end_time = time.time()
-    asr_duration = end_time - start_time
-    audio_duration = info.duration
-    rtf = asr_duration / audio_duration if audio_duration > 0 else 0.0
-
-    logger.debug("-" * 30)
-    logger.debug(f"音频时长 (Audio Duration): {audio_duration:.2f}s")
-    logger.debug(f"转录耗时 (ASR Duration):   {asr_duration:.2f}s")
-    logger.debug(f"实时率 (RTF):            {rtf:.4f}")
+        logger.debug("-" * 30)
+        logger.debug(f"音频时长 (Audio Duration): {audio_duration:.2f}s")
+        logger.debug(f"转录耗时 (ASR Duration):   {asr_duration:.2f}s")
+        logger.debug(f"实时率 (RTF):            {rtf:.4f}")
 
 with condition:
     remainder = shared["tail_samples"]

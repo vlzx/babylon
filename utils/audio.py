@@ -40,7 +40,10 @@ def stream_wav_realtime(wav_path, frame_duration_ms=20, dtype="float32"):
         current_time = time.time()
         if current_time < target_time:
             time.sleep(target_time - current_time)
-            
+        
+        if chunks_processed == 0:
+            print('首包音频输出')
+        
         yield audio_chunk
         
         chunks_processed += 1
